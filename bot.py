@@ -9,12 +9,21 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Channels (0 if not set)
+# 🟢 SMART LOADER (Handles both IDs and @Usernames)
+def load_channel(key):
+    val = os.environ.get(key)
+    if not val: return 0
+    try:
+        return int(val) # Try to convert to Number (ID)
+    except ValueError:
+        return val # If not a number, return as String (Username)
+
+# Load Channels
 CHANNELS = {
-    "ch1": int(os.environ.get("CHANNEL_1", 0)),
-    "ch2": int(os.environ.get("CHANNEL_2", 0)),
-    "ch3": int(os.environ.get("CHANNEL_3", 0)),
-    "ch4": int(os.environ.get("CHANNEL_4", 0))
+    "ch1": load_channel("CHANNEL_1"),
+    "ch2": load_channel("CHANNEL_2"),
+    "ch3": load_channel("CHANNEL_3"),
+    "ch4": load_channel("CHANNEL_4")
 }
 
 # 🟢 DEFAULT OFF STATE
@@ -85,7 +94,8 @@ async def auto_forward_files(client, message):
     # Check which channels are ON
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
-        if is_on and target_id != 0:
+        # Check if target_id is valid (not 0)
+        if is_on and target_id:
             try:
                 await message.forward(target_id)
                 await asyncio.sleep(0.5)
@@ -129,7 +139,7 @@ async def post_info(client, message):
         count = 0
         for key, is_on in FORWARD_SETTINGS.items():
             target_id = CHANNELS.get(key)
-            if is_on and target_id != 0:
+            if is_on and target_id:
                 try: 
                     await client.send_photo(target_id, photo=img, caption=caption)
                     count += 1
@@ -144,7 +154,7 @@ async def send_sticker_cmd(client, message):
     count = 0
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
-        if is_on and target_id != 0:
+        if is_on and target_id:
             try: 
                 await client.send_sticker(target_id, sticker=STICKER_ID)
                 count += 1
