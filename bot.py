@@ -6,14 +6,13 @@ from pyrogram import Client, filters, idle
 from aiohttp import web
 
 # ==============================
-# 🔐 CONFIGURATION (FROM RENDER ENV)
+# 🔐 CONFIGURATION
 # ==============================
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 WORKER_USERNAME = os.environ.get("WORKER_USERNAME")
 
-# Helper to load channels safely
 def load_channel(key):
     val = os.environ.get(key)
     if not val: return 0
@@ -28,45 +27,37 @@ CHANNELS = {
 }
 
 STICKER_ID = os.environ.get("STICKER_ID", "")
-
-# Default Settings (Reset on Restart)
 FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 BATCH_STATE = {"sticker_pending": False}
 
-# ==============================
-# 🤖 MANAGER CLIENT
-# ==============================
-app = Client(
-    "manager_userbot", 
-    api_id=API_ID, 
-    api_hash=API_HASH, 
-    session_string=SESSION_STRING
-)
+app = Client("manager_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 # ==============================
-# 🎨 ANIME INFO FETCH (CLEAN STYLE)
+# 🎨 ANIME INFO FETCH
 # ==============================
 def get_anime_info(query):
     try:
+        print(f"🔎 Searching Jikan for: '{query}'")
         url = f"https://api.jikan.moe/v4/anime?q={query}&limit=1"
         res = requests.get(url).json()
-        if not res['data']: return None, None
+        if not res.get('data'):
+            print(f"⚠️ No results found for: '{query}'")
+            return None, None
+        
         anime = res['data'][0]
+        print(f"✅ Found: {anime['title']}")
 
         img = anime['images']['jpg']['large_image_url']
         title_eng = anime.get('title_english', anime['title'])
         title_jp = anime.get('title_japanese', '')
         
-        # Hashtag (First Word)
         first_word = title_eng.split(' ')[0]
         hashtag = "#" + "".join(c for c in first_word if c.isalnum())
 
-        # Audio
         audio_txt = "Japanese [English Sub]"
         if "dub" in query.lower() or "english" in query.lower():
              audio_txt = "English [Dub]"
 
-        # Duration
         duration_raw = anime.get('duration', '24 min')
         duration_clean = duration_raw.replace(' per ep', '').replace(' min.', ' min').strip() + "/Ep"
 
@@ -80,7 +71,7 @@ def get_anime_info(query):
         )
         return img, caption
     except Exception as e:
-        print(f"API Error: {e}")
+        print(f"❌ API Error: {e}")
         return None, None
 
 # ==============================
@@ -91,12 +82,13 @@ async def command_parser(client, message):
     cmd_text = message.text
     active_channels = [k for k,v in FORWARD_SETTINGS.items() if v]
     
-    # Flags Logic
+    # 🚩 FLAG: -post
     if "-post" in cmd_text:
-        name_match = re.search(r'-a\s+["\']([^"\']+)["\']', cmd_text)
+        # 🛠️ UPDATED REGEX: Captures name better, even without quotes
+        name_match = re.search(r'-a\s+(["\']?)(.*?)\1(?=\s-|$)', cmd_text)
         if name_match and active_channels:
-            anime_name = name_match.group(1)
-            # Check for Dub flag in command to adjust post text
+            anime_name = name_match.group(2).strip()
+            
             is_dub = "-o eng" in cmd_text
             search_q = anime_name + (" dub" if is_dub else "")
             
@@ -108,13 +100,14 @@ async def command_parser(client, message):
                         try: await client.send_photo(tid, photo=img, caption=caption)
                         except: pass
 
+    # 🚩 FLAG: -sticker
     if "-sticker" in cmd_text:
         BATCH_STATE["sticker_pending"] = True
     else:
         BATCH_STATE["sticker_pending"] = False
 
 # ==============================
-# 📦 2. FILE COPIER (No Tags)
+# 📦 2. FILE COPIER
 # ==============================
 @app.on_message(filters.document & filters.user(WORKER_USERNAME))
 async def auto_forward_files(client, message):
@@ -139,7 +132,10 @@ async def auto_forward_files(client, message):
 @app.on_message(filters.text & filters.user(WORKER_USERNAME) & filters.regex("Batch Complete"))
 async def batch_finisher(client, message):
     if BATCH_STATE["sticker_pending"]:
-        await asyncio.sleep(0.5)
+        # 🛠️ FIX: Increased delay to 2.0 seconds
+        print("⏳ Waiting for files to settle before sending sticker...")
+        await asyncio.sleep(2.0)
+        
         for key, is_on in FORWARD_SETTINGS.items():
             target_id = CHANNELS.get(key)
             if is_on and target_id != 0 and STICKER_ID:
@@ -165,13 +161,12 @@ async def settings_cmd(client, message):
     await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
 
 # ==============================
-# 🌐 WEB SERVER (KEEP-ALIVE)
+# 🌐 WEB SERVER
 # ==============================
 async def health_check(request):
     return web.Response(text="Manager Userbot is Running!", status=200)
 
 async def start_web_server():
-    # Render assigns a random port to the PORT env var
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
     web_app.router.add_get("/", health_check)
@@ -179,10 +174,9 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🌍 Web Server running on port {port}")
 
 # ==============================
-# 🚀 MAIN LOOP
+# 🚀 MAIN
 # ==============================
 async def main():
     await start_web_server()
