@@ -9,16 +9,12 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# 🟢 SMART LOADER (Handles both IDs and @Usernames)
 def load_channel(key):
     val = os.environ.get(key)
     if not val: return 0
-    try:
-        return int(val) # Try to convert to Number (ID)
-    except ValueError:
-        return val # If not a number, return as String (Username)
+    try: return int(val)
+    except ValueError: return val
 
-# Load Channels
 CHANNELS = {
     "ch1": load_channel("CHANNEL_1"),
     "ch2": load_channel("CHANNEL_2"),
@@ -26,17 +22,9 @@ CHANNELS = {
     "ch4": load_channel("CHANNEL_4")
 }
 
-# 🟢 DEFAULT OFF STATE
-FORWARD_SETTINGS = {
-    "ch1": False,
-    "ch2": False,
-    "ch3": False,
-    "ch4": False
-}
-
+FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 STICKER_ID = os.environ.get("STICKER_ID", "")
 
-# Client Setup
 app = Client("manager_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- JIKAN API ---
@@ -63,14 +51,10 @@ def get_anime_info(query):
             return img, caption
     except: return None, None
 
-# ==========================================
-# 🌐 0. WEB SERVER (RENDER HEALTH CHECK)
-# ==========================================
-async def health_check(request):
-    return web.Response(text="Bot is Running!", status=200)
+# --- WEB SERVER ---
+async def health_check(request): return web.Response(text="Running", status=200)
 
 async def start_web_server():
-    # Render provides the PORT env var
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
     web_app.router.add_get("/", health_check)
@@ -81,60 +65,55 @@ async def start_web_server():
     print(f"🌍 Web Server running on port {port}")
 
 # ==========================================
-# 🚀 1. AUTO-FORWARDER (CONTROLLED)
+# 🚀 1. AUTO-FORWARDER (DEBUG MODE)
 # ==========================================
 @app.on_message(filters.group & filters.document)
 async def auto_forward_files(client, message):
     file_name = message.document.file_name
     if not file_name: return
-    # Only forward mp4/mkv
-    if not (file_name.endswith(".mp4") or file_name.endswith(".mkv")):
+
+    # 🟢 DEBUG PRINT: What did we see?
+    print(f"[DEBUG] Saw file: {file_name}")
+
+    # Case-Insensitive Check (.mp4, .MP4, .mkv, .MKV)
+    if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")):
+        print(f"[DEBUG] Ignoring {file_name} (Not a video)")
         return
 
-    # Check which channels are ON
+    print(f"[DETECTED] Video: {file_name} -> Checking settings...")
+
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
-        # Check if target_id is valid (not 0)
         if is_on and target_id:
             try:
                 await message.forward(target_id)
+                print(f"[SUCCESS] Forwarded to {key}")
                 await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"❌ Forward {key} Failed: {e}")
 
 # ==========================================
-# 🎛️ 2. CHANNEL TOGGLE COMMANDS
+# 🎛️ 2. COMMANDS
 # ==========================================
 @app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"]))
 async def toggle_channel(client, message):
-    cmd = message.command[0].lower() # e.g. "ch1"
-    try: state = message.command[1].lower() # "on" or "off"
+    cmd = message.command[0].lower()
+    try: state = message.command[1].lower()
     except: return await message.reply(f"⚠️ Usage: `/{cmd} on` or `/{cmd} off`")
-    
     if cmd in FORWARD_SETTINGS:
-        if state == "on":
-            FORWARD_SETTINGS[cmd] = True
-            await message.reply(f"✅ **{cmd.upper()} Enabled.**")
-        elif state == "off":
-            FORWARD_SETTINGS[cmd] = False
-            await message.reply(f"❌ **{cmd.upper()} Disabled.**")
-        else:
-            await message.reply("⚠️ Use `on` or `off`")
+        FORWARD_SETTINGS[cmd] = (state == "on")
+        await message.reply(f"✅ **{cmd.upper()} {'Enabled' if state=='on' else 'Disabled'}.**")
 
 @app.on_message(filters.command("settings"))
 async def check_settings(client, message):
     status = "\n".join([f"📢 {k.upper()}: {'✅ ON' if v else '❌ OFF'}" for k, v in FORWARD_SETTINGS.items()])
     await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
 
-# ==========================================
-# 📝 3. POST & STICKER
-# ==========================================
 @app.on_message(filters.command("post"))
 async def post_info(client, message):
     query = message.text[6:].strip()
     if not query: return await message.reply("⚠️ Usage: `/post Name`")
     img, caption = get_anime_info(query)
-    
     if img:
         count = 0
         for key, is_on in FORWARD_SETTINGS.items():
@@ -145,8 +124,7 @@ async def post_info(client, message):
                     count += 1
                 except: pass
         await message.reply(f"✅ Post sent to {count} active channels.")
-    else:
-        await message.reply("❌ Anime not found.")
+    else: await message.reply("❌ Anime not found.")
 
 @app.on_message(filters.command("sticker"))
 async def send_sticker_cmd(client, message):
@@ -161,10 +139,9 @@ async def send_sticker_cmd(client, message):
             except: pass
     await message.reply(f"✅ Sticker sent to {count} active channels.")
 
-# START BOTH (BOT + WEB SERVER)
 async def main():
     await start_web_server()
-    print("🤖 MANAGER BOT STARTED (Web Service Active)")
+    print("🤖 MANAGER BOT STARTED (Debug Mode)")
     await app.start()
     await idle()
     await app.stop()
