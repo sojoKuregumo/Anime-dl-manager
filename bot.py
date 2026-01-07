@@ -4,12 +4,14 @@ import requests
 from pyrogram import Client, filters, idle
 from aiohttp import web
 
-# --- CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# 🟢 REMOVED GROUP_ID REQUIREMENT FOR TESTING
+# 🟢 NEW: The specific Bot to watch (Targeted Detection)
+# Enter the username WITHOUT '@' (e.g., reigen_dl_bot)
+WORKER_USERNAME = os.environ.get("WORKER_USERNAME", "")
 
 def load_channel(key):
     val = os.environ.get(key)
@@ -27,8 +29,10 @@ CHANNELS = {
 FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 STICKER_ID = os.environ.get("STICKER_ID", "")
 
+# Client Setup
 app = Client("manager_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
+# --- JIKAN API ---
 def get_anime_info(query):
     try:
         url = f"https://api.jikan.moe/v4/anime?q={query}&limit=1"
@@ -52,7 +56,9 @@ def get_anime_info(query):
             return img, caption
     except: return None, None
 
+# --- WEB SERVER ---
 async def health_check(request): return web.Response(text="Userbot Running", status=200)
+
 async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
@@ -64,37 +70,33 @@ async def start_web_server():
     print(f"🌍 Web Server running on port {port}")
 
 # ==========================================
-# 🚀 1. AUTO-FORWARDER (UNRESTRICTED)
+# 🎯 1. TARGETED AUTO-FORWARDER
 # ==========================================
-# 🟢 REMOVED filters.chat(GROUP_ID)
-# It now looks at ALL groups the Userbot is in.
-@app.on_message(filters.group & (filters.document | filters.video))
+# This filter ONLY allows messages from the WORKER_USERNAME
+@app.on_message(filters.document & filters.user(WORKER_USERNAME))
 async def auto_forward_files(client, message):
-    file_name = message.document.file_name if message.document else ""
+    file_name = message.document.file_name
     if not file_name: return
 
-    # 🟢 DEBUG LOG: Print everything we see
-    print(f"[👀 SAW] {file_name} in Chat ID: {message.chat.id}")
+    print(f"[🎯 MATCH] File from Worker Bot detected: {file_name}")
 
     if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")):
         return
 
-    print(f"[✅ DETECTED] Valid Anime File: {file_name}")
-
+    # Forward to active channels
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
         if is_on and target_id:
             try:
-                # Forward using the message link or direct forward
                 await message.forward(target_id)
                 await asyncio.sleep(1.0)
             except Exception as e:
                 print(f"❌ Forward {key} Failed: {e}")
 
 # ==========================================
-# 🎛️ 2. COMMANDS (UNRESTRICTED)
+# 🎛️ 2. COMMANDS (Available to Everyone in Group)
 # ==========================================
-@app.on_message(filters.group & filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
+@app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
 async def toggle_channel(client, message):
     cmd = message.command[0].lower()
     try: state = message.command[1].lower()
@@ -103,12 +105,12 @@ async def toggle_channel(client, message):
         FORWARD_SETTINGS[cmd] = (state == "on")
         await message.reply(f"✅ **{cmd.upper()} {'Enabled' if state=='on' else 'Disabled'}.**")
 
-@app.on_message(filters.group & filters.command("settings", prefixes="/"))
+@app.on_message(filters.command("settings", prefixes="/"))
 async def check_settings(client, message):
     status = "\n".join([f"📢 {k.upper()}: {'✅ ON' if v else '❌ OFF'}" for k, v in FORWARD_SETTINGS.items()])
     await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
 
-@app.on_message(filters.group & filters.command("post", prefixes="/"))
+@app.on_message(filters.command("post", prefixes="/"))
 async def post_info(client, message):
     query = message.text[6:].strip()
     if not query: return await message.reply("⚠️ Usage: `/post Name`")
@@ -122,7 +124,7 @@ async def post_info(client, message):
         await message.reply("✅ Post sent.")
     else: await message.reply("❌ Anime not found.")
 
-@app.on_message(filters.group & filters.command("sticker", prefixes="/"))
+@app.on_message(filters.command("sticker", prefixes="/"))
 async def send_sticker_cmd(client, message):
     if not STICKER_ID: return
     for key, is_on in FORWARD_SETTINGS.items():
@@ -134,8 +136,13 @@ async def send_sticker_cmd(client, message):
 
 async def main():
     await start_web_server()
-    print("🤖 MANAGER USERBOT STARTED (Global Detection Mode)")
     await app.start()
+    
+    # 🟢 DEBUG: Verify who the Userbot is logged in as
+    me = await app.get_me()
+    print(f"✅ LOGGED IN AS: {me.first_name} (@{me.username})")
+    print(f"👀 WATCHING TARGET BOT: @{WORKER_USERNAME}")
+    
     await idle()
     await app.stop()
 
