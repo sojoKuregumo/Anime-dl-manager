@@ -2,6 +2,7 @@ import os
 import asyncio
 import requests
 from pyrogram import Client, filters, idle
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid
 from aiohttp import web
 
 # --- 1. CONFIGURATION ---
@@ -9,9 +10,9 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# 🟢 NEW: The specific Bot to watch (Targeted Detection)
-# Enter the username WITHOUT '@' (e.g., reigen_dl_bot)
-WORKER_USERNAME = os.environ.get("WORKER_USERNAME", "")
+# 🟢 TARGET WATCHING (Handle common mistakes like adding '@')
+WORKER_RAW = os.environ.get("WORKER_USERNAME", "")
+WORKER_USERNAME = WORKER_RAW.replace("@", "").strip()
 
 def load_channel(key):
     val = os.environ.get(key)
@@ -29,7 +30,6 @@ CHANNELS = {
 FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 STICKER_ID = os.environ.get("STICKER_ID", "")
 
-# Client Setup
 app = Client("manager_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 # --- JIKAN API ---
@@ -57,7 +57,7 @@ def get_anime_info(query):
     except: return None, None
 
 # --- WEB SERVER ---
-async def health_check(request): return web.Response(text="Userbot Running", status=200)
+async def health_check(request): return web.Response(text="Userbot Alive", status=200)
 
 async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -70,20 +70,53 @@ async def start_web_server():
     print(f"🌍 Web Server running on port {port}")
 
 # ==========================================
-# 🎯 1. TARGETED AUTO-FORWARDER
+# 🛠️ NEW: DEBUG COMMAND (Test without Downloading)
 # ==========================================
-# This filter ONLY allows messages from the WORKER_USERNAME
+@app.on_message(filters.command("debug", prefixes="/"))
+async def debug_message(client, message):
+    if not message.reply_to_message:
+        return await message.reply("⚠️ **Reply to a file/video to debug it.**")
+    
+    target = message.reply_to_message
+    file_name = target.document.file_name if target.document else "Unknown/Video"
+    sender = target.from_user.username if target.from_user else "Unknown"
+    
+    report = (
+        f"🕵️ **DEBUG REPORT**\n"
+        f"• **File Name:** `{file_name}`\n"
+        f"• **Sent By:** @{sender}\n"
+        f"• **My Target Worker:** @{WORKER_USERNAME}\n"
+        f"• **Match?** {'✅ YES' if sender.lower() == WORKER_USERNAME.lower() else '❌ NO'}\n"
+        f"• **Is Video?** {'✅ YES' if file_name.endswith(('.mp4', '.mkv')) else '❌ NO'}"
+    )
+    
+    # Try a fake forward to test permissions
+    try:
+        active_ch = [k for k, v in FORWARD_SETTINGS.items() if v]
+        if active_ch:
+            dest = CHANNELS[active_ch[0]]
+            await target.forward(dest)
+            report += f"\n\n✅ **Test Forward Success:** Sent to {active_ch[0]}"
+        else:
+            report += "\n\n⚠️ **Test Skipped:** No channels turned ON."
+    except Exception as e:
+        report += f"\n\n❌ **Test Forward FAILED:** {e}"
+        
+    await message.reply(report)
+
+# ==========================================
+# 🎯 TARGETED AUTO-FORWARDER
+# ==========================================
 @app.on_message(filters.document & filters.user(WORKER_USERNAME))
 async def auto_forward_files(client, message):
     file_name = message.document.file_name
     if not file_name: return
 
-    print(f"[🎯 MATCH] File from Worker Bot detected: {file_name}")
+    print(f"[🎯 MATCH] Saw file from Worker: {file_name}")
 
     if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")):
         return
 
-    # Forward to active channels
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
         if is_on and target_id:
@@ -94,7 +127,7 @@ async def auto_forward_files(client, message):
                 print(f"❌ Forward {key} Failed: {e}")
 
 # ==========================================
-# 🎛️ 2. COMMANDS (Available to Everyone in Group)
+# 🎛️ COMMANDS
 # ==========================================
 @app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
 async def toggle_channel(client, message):
@@ -136,13 +169,19 @@ async def send_sticker_cmd(client, message):
 
 async def main():
     await start_web_server()
-    await app.start()
+    print("🔄 Connecting to Telegram...")
     
-    # 🟢 DEBUG: Verify who the Userbot is logged in as
-    me = await app.get_me()
-    print(f"✅ LOGGED IN AS: {me.first_name} (@{me.username})")
-    print(f"👀 WATCHING TARGET BOT: @{WORKER_USERNAME}")
-    
+    try:
+        await app.start()
+        me = await app.get_me()
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"✅ LOGGED IN SUCCESS: {me.first_name} (@{me.username})")
+        print(f"👀 WATCHING TARGET: @{WORKER_USERNAME}")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    except Exception as e:
+        print(f"❌ LOGIN FAILED: {e}")
+        return
+
     await idle()
     await app.stop()
 
