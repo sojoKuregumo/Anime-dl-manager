@@ -7,7 +7,8 @@ from aiohttp import web
 # --- 1. CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+SESSION_STRING = os.environ.get("SESSION_STRING") # <--- Login as User
+GROUP_ID = int(os.environ.get("GROUP_ID", 0))     # <--- Only watch this group
 
 def load_channel(key):
     val = os.environ.get(key)
@@ -25,7 +26,13 @@ CHANNELS = {
 FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 STICKER_ID = os.environ.get("STICKER_ID", "")
 
-app = Client("manager_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# 🟢 CLIENT SETUP (USERBOT MODE)
+app = Client(
+    "manager_userbot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION_STRING
+)
 
 # --- JIKAN API ---
 def get_anime_info(query):
@@ -51,8 +58,8 @@ def get_anime_info(query):
             return img, caption
     except: return None, None
 
-# --- WEB SERVER ---
-async def health_check(request): return web.Response(text="Running", status=200)
+# --- WEB SERVER (Keep Render Alive) ---
+async def health_check(request): return web.Response(text="Userbot Running!", status=200)
 
 async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -65,55 +72,56 @@ async def start_web_server():
     print(f"🌍 Web Server running on port {port}")
 
 # ==========================================
-# 🚀 1. AUTO-FORWARDER (DEBUG MODE)
+# 🚀 1. AUTO-FORWARDER (USERBOT MODE)
 # ==========================================
-@app.on_message(filters.group & filters.document)
+# We check filters.chat(GROUP_ID) to ensure we only forward from YOUR group
+@app.on_message(filters.chat(GROUP_ID) & (filters.document | filters.video))
 async def auto_forward_files(client, message):
-    file_name = message.document.file_name
+    file_name = message.document.file_name if message.document else ""
     if not file_name: return
 
-    # 🟢 DEBUG PRINT: What did we see?
-    print(f"[DEBUG] Saw file: {file_name}")
-
-    # Case-Insensitive Check (.mp4, .MP4, .mkv, .MKV)
+    # Case-Insensitive Check
     if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")):
-        print(f"[DEBUG] Ignoring {file_name} (Not a video)")
         return
 
-    print(f"[DETECTED] Video: {file_name} -> Checking settings...")
+    print(f"[DETECTED] {file_name} from Bot/User. Forwarding...")
 
     for key, is_on in FORWARD_SETTINGS.items():
         target_id = CHANNELS.get(key)
         if is_on and target_id:
             try:
+                # Userbots can forward ANYTHING (even from other bots)
                 await message.forward(target_id)
-                print(f"[SUCCESS] Forwarded to {key}")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0) # Slightly slower for Userbots to be safe
             except Exception as e:
                 print(f"❌ Forward {key} Failed: {e}")
 
 # ==========================================
-# 🎛️ 2. COMMANDS
+# 🎛️ 2. COMMANDS (Must use "Me" or "Admin" filter ideally)
 # ==========================================
-@app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"]))
+# Since this is a userbot, it listens to commands YOU type in the group
+
+@app.on_message(filters.chat(GROUP_ID) & filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
 async def toggle_channel(client, message):
     cmd = message.command[0].lower()
     try: state = message.command[1].lower()
     except: return await message.reply(f"⚠️ Usage: `/{cmd} on` or `/{cmd} off`")
+    
     if cmd in FORWARD_SETTINGS:
         FORWARD_SETTINGS[cmd] = (state == "on")
         await message.reply(f"✅ **{cmd.upper()} {'Enabled' if state=='on' else 'Disabled'}.**")
 
-@app.on_message(filters.command("settings"))
+@app.on_message(filters.chat(GROUP_ID) & filters.command("settings", prefixes="/"))
 async def check_settings(client, message):
     status = "\n".join([f"📢 {k.upper()}: {'✅ ON' if v else '❌ OFF'}" for k, v in FORWARD_SETTINGS.items()])
     await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
 
-@app.on_message(filters.command("post"))
+@app.on_message(filters.chat(GROUP_ID) & filters.command("post", prefixes="/"))
 async def post_info(client, message):
     query = message.text[6:].strip()
     if not query: return await message.reply("⚠️ Usage: `/post Name`")
     img, caption = get_anime_info(query)
+    
     if img:
         count = 0
         for key, is_on in FORWARD_SETTINGS.items():
@@ -126,7 +134,7 @@ async def post_info(client, message):
         await message.reply(f"✅ Post sent to {count} active channels.")
     else: await message.reply("❌ Anime not found.")
 
-@app.on_message(filters.command("sticker"))
+@app.on_message(filters.chat(GROUP_ID) & filters.command("sticker", prefixes="/"))
 async def send_sticker_cmd(client, message):
     if not STICKER_ID: return
     count = 0
@@ -141,7 +149,7 @@ async def send_sticker_cmd(client, message):
 
 async def main():
     await start_web_server()
-    print("🤖 MANAGER BOT STARTED (Debug Mode)")
+    print("🤖 MANAGER USERBOT STARTED (I can see everything!)")
     await app.start()
     await idle()
     await app.stop()
