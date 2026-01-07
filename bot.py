@@ -1,24 +1,24 @@
 import os
 import asyncio
+import re
 import requests
 from pyrogram import Client, filters, idle
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid
 from aiohttp import web
 
-# --- 1. CONFIGURATION ---
+# ==============================
+# 🔐 CONFIGURATION (FROM RENDER ENV)
+# ==============================
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 SESSION_STRING = os.environ.get("SESSION_STRING")
+WORKER_USERNAME = os.environ.get("WORKER_USERNAME")
 
-# 🟢 TARGET WATCHING (Handle common mistakes like adding '@')
-WORKER_RAW = os.environ.get("WORKER_USERNAME", "")
-WORKER_USERNAME = WORKER_RAW.replace("@", "").strip()
-
+# Helper to load channels safely
 def load_channel(key):
     val = os.environ.get(key)
     if not val: return 0
     try: return int(val)
-    except ValueError: return val
+    except ValueError: return 0
 
 CHANNELS = {
     "ch1": load_channel("CHANNEL_1"),
@@ -27,39 +27,151 @@ CHANNELS = {
     "ch4": load_channel("CHANNEL_4")
 }
 
-FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
 STICKER_ID = os.environ.get("STICKER_ID", "")
 
-app = Client("manager_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+# Default Settings (Reset on Restart)
+FORWARD_SETTINGS = {"ch1": False, "ch2": False, "ch3": False, "ch4": False}
+BATCH_STATE = {"sticker_pending": False}
 
-# --- JIKAN API ---
+# ==============================
+# 🤖 MANAGER CLIENT
+# ==============================
+app = Client(
+    "manager_userbot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION_STRING
+)
+
+# ==============================
+# 🎨 ANIME INFO FETCH (CLEAN STYLE)
+# ==============================
 def get_anime_info(query):
     try:
         url = f"https://api.jikan.moe/v4/anime?q={query}&limit=1"
         res = requests.get(url).json()
-        if res['data']:
-            anime = res['data'][0]
-            img = anime['images']['jpg']['large_image_url']
-            title = anime['title']
-            if "[English Dub]" in query: title += " [English Dub]"
-            first_word = title.split()[0]
-            tag = "#" + "".join(filter(str.isalnum, first_word))
-            caption = (
-                f"{title} | {anime.get('title_japanese', '')}\n"
-                f"{tag}\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"• Type: {anime.get('type', 'TV')}\n"
-                f"• Episodes: {anime.get('episodes', '?')}\n"
-                f"• Duration: {anime.get('duration', '24 min').replace(' per ep', '')}\n"
-                f"• Status: {anime.get('status', 'Finished')}"
-            )
-            return img, caption
-    except: return None, None
+        if not res['data']: return None, None
+        anime = res['data'][0]
 
-# --- WEB SERVER ---
-async def health_check(request): return web.Response(text="Userbot Alive", status=200)
+        img = anime['images']['jpg']['large_image_url']
+        title_eng = anime.get('title_english', anime['title'])
+        title_jp = anime.get('title_japanese', '')
+        
+        # Hashtag (First Word)
+        first_word = title_eng.split(' ')[0]
+        hashtag = "#" + "".join(c for c in first_word if c.isalnum())
+
+        # Audio
+        audio_txt = "Japanese [English Sub]"
+        if "dub" in query.lower() or "english" in query.lower():
+             audio_txt = "English [Dub]"
+
+        # Duration
+        duration_raw = anime.get('duration', '24 min')
+        duration_clean = duration_raw.replace(' per ep', '').replace(' min.', ' min').strip() + "/Ep"
+
+        caption = (
+            f"{title_eng} | {title_jp}\n"
+            f"{hashtag}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Audio: {audio_txt}\n"
+            f"• Duration: {duration_clean}\n"
+            f"• Quality: 360p, 720p, 1080p"
+        )
+        return img, caption
+    except Exception as e:
+        print(f"API Error: {e}")
+        return None, None
+
+# ==============================
+# 🧠 1. COMMAND PARSER (/dl Spy)
+# ==============================
+@app.on_message(filters.text & filters.regex(r"^/dl"))
+async def command_parser(client, message):
+    cmd_text = message.text
+    active_channels = [k for k,v in FORWARD_SETTINGS.items() if v]
+    
+    # Flags Logic
+    if "-post" in cmd_text:
+        name_match = re.search(r'-a\s+["\']([^"\']+)["\']', cmd_text)
+        if name_match and active_channels:
+            anime_name = name_match.group(1)
+            # Check for Dub flag in command to adjust post text
+            is_dub = "-o eng" in cmd_text
+            search_q = anime_name + (" dub" if is_dub else "")
+            
+            img, caption = get_anime_info(search_q)
+            if img:
+                for key in active_channels:
+                    tid = CHANNELS.get(key)
+                    if tid:
+                        try: await client.send_photo(tid, photo=img, caption=caption)
+                        except: pass
+
+    if "-sticker" in cmd_text:
+        BATCH_STATE["sticker_pending"] = True
+    else:
+        BATCH_STATE["sticker_pending"] = False
+
+# ==============================
+# 📦 2. FILE COPIER (No Tags)
+# ==============================
+@app.on_message(filters.document & filters.user(WORKER_USERNAME))
+async def auto_forward_files(client, message):
+    file_name = message.document.file_name
+    if not file_name: return
+    if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")): return
+
+    print(f"[👀 SAW FILE] {file_name}")
+
+    for key, is_on in FORWARD_SETTINGS.items():
+        target_id = CHANNELS.get(key)
+        if is_on and target_id != 0:
+            try:
+                await message.copy(target_id)
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                print(f"[❌ FAILED] {key}: {e}")
+
+# ==============================
+# 🏁 3. BATCH FINISHER (Sticker)
+# ==============================
+@app.on_message(filters.text & filters.user(WORKER_USERNAME) & filters.regex("Batch Complete"))
+async def batch_finisher(client, message):
+    if BATCH_STATE["sticker_pending"]:
+        await asyncio.sleep(0.5)
+        for key, is_on in FORWARD_SETTINGS.items():
+            target_id = CHANNELS.get(key)
+            if is_on and target_id != 0 and STICKER_ID:
+                try: await client.send_sticker(target_id, sticker=STICKER_ID)
+                except: pass
+        BATCH_STATE["sticker_pending"] = False
+
+# ==============================
+# 🎛️ COMMANDS
+# ==============================
+@app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
+async def toggle(client, message):
+    cmd = message.command[0].lower()
+    try: state = message.command[1].lower()
+    except: return
+    if cmd in FORWARD_SETTINGS:
+        FORWARD_SETTINGS[cmd] = (state == "on")
+        await message.reply(f"✅ **{cmd.upper()} {'Enabled' if state=='on' else 'Disabled'}.**")
+
+@app.on_message(filters.command("settings", prefixes="/"))
+async def settings_cmd(client, message):
+    status = "\n".join([f"📢 {k.upper()}: {'✅ ON' if v else '❌ OFF'}" for k, v in FORWARD_SETTINGS.items()])
+    await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
+
+# ==============================
+# 🌐 WEB SERVER (KEEP-ALIVE)
+# ==============================
+async def health_check(request):
+    return web.Response(text="Manager Userbot is Running!", status=200)
 
 async def start_web_server():
+    # Render assigns a random port to the PORT env var
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
     web_app.router.add_get("/", health_check)
@@ -69,119 +181,15 @@ async def start_web_server():
     await site.start()
     print(f"🌍 Web Server running on port {port}")
 
-# ==========================================
-# 🛠️ NEW: DEBUG COMMAND (Test without Downloading)
-# ==========================================
-@app.on_message(filters.command("debug", prefixes="/"))
-async def debug_message(client, message):
-    if not message.reply_to_message:
-        return await message.reply("⚠️ **Reply to a file/video to debug it.**")
-    
-    target = message.reply_to_message
-    file_name = target.document.file_name if target.document else "Unknown/Video"
-    sender = target.from_user.username if target.from_user else "Unknown"
-    
-    report = (
-        f"🕵️ **DEBUG REPORT**\n"
-        f"• **File Name:** `{file_name}`\n"
-        f"• **Sent By:** @{sender}\n"
-        f"• **My Target Worker:** @{WORKER_USERNAME}\n"
-        f"• **Match?** {'✅ YES' if sender.lower() == WORKER_USERNAME.lower() else '❌ NO'}\n"
-        f"• **Is Video?** {'✅ YES' if file_name.endswith(('.mp4', '.mkv')) else '❌ NO'}"
-    )
-    
-    # Try a fake forward to test permissions
-    try:
-        active_ch = [k for k, v in FORWARD_SETTINGS.items() if v]
-        if active_ch:
-            dest = CHANNELS[active_ch[0]]
-            await target.forward(dest)
-            report += f"\n\n✅ **Test Forward Success:** Sent to {active_ch[0]}"
-        else:
-            report += "\n\n⚠️ **Test Skipped:** No channels turned ON."
-    except Exception as e:
-        report += f"\n\n❌ **Test Forward FAILED:** {e}"
-        
-    await message.reply(report)
-
-# ==========================================
-# 🎯 TARGETED AUTO-FORWARDER
-# ==========================================
-@app.on_message(filters.document & filters.user(WORKER_USERNAME))
-async def auto_forward_files(client, message):
-    file_name = message.document.file_name
-    if not file_name: return
-
-    print(f"[🎯 MATCH] Saw file from Worker: {file_name}")
-
-    if not (file_name.lower().endswith(".mp4") or file_name.lower().endswith(".mkv")):
-        return
-
-    for key, is_on in FORWARD_SETTINGS.items():
-        target_id = CHANNELS.get(key)
-        if is_on and target_id:
-            try:
-                await message.forward(target_id)
-                await asyncio.sleep(1.0)
-            except Exception as e:
-                print(f"❌ Forward {key} Failed: {e}")
-
-# ==========================================
-# 🎛️ COMMANDS
-# ==========================================
-@app.on_message(filters.command(["ch1", "ch2", "ch3", "ch4"], prefixes="/"))
-async def toggle_channel(client, message):
-    cmd = message.command[0].lower()
-    try: state = message.command[1].lower()
-    except: return await message.reply(f"⚠️ Usage: `/{cmd} on` or `/{cmd} off`")
-    if cmd in FORWARD_SETTINGS:
-        FORWARD_SETTINGS[cmd] = (state == "on")
-        await message.reply(f"✅ **{cmd.upper()} {'Enabled' if state=='on' else 'Disabled'}.**")
-
-@app.on_message(filters.command("settings", prefixes="/"))
-async def check_settings(client, message):
-    status = "\n".join([f"📢 {k.upper()}: {'✅ ON' if v else '❌ OFF'}" for k, v in FORWARD_SETTINGS.items()])
-    await message.reply(f"**⚙️ Forwarding Status:**\n{status}")
-
-@app.on_message(filters.command("post", prefixes="/"))
-async def post_info(client, message):
-    query = message.text[6:].strip()
-    if not query: return await message.reply("⚠️ Usage: `/post Name`")
-    img, caption = get_anime_info(query)
-    if img:
-        for key, is_on in FORWARD_SETTINGS.items():
-            target_id = CHANNELS.get(key)
-            if is_on and target_id:
-                try: await client.send_photo(target_id, photo=img, caption=caption)
-                except: pass
-        await message.reply("✅ Post sent.")
-    else: await message.reply("❌ Anime not found.")
-
-@app.on_message(filters.command("sticker", prefixes="/"))
-async def send_sticker_cmd(client, message):
-    if not STICKER_ID: return
-    for key, is_on in FORWARD_SETTINGS.items():
-        target_id = CHANNELS.get(key)
-        if is_on and target_id:
-            try: await client.send_sticker(target_id, sticker=STICKER_ID)
-            except: pass
-    await message.reply("✅ Sticker sent.")
-
+# ==============================
+# 🚀 MAIN LOOP
+# ==============================
 async def main():
     await start_web_server()
-    print("🔄 Connecting to Telegram...")
-    
-    try:
-        await app.start()
-        me = await app.get_me()
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print(f"✅ LOGGED IN SUCCESS: {me.first_name} (@{me.username})")
-        print(f"👀 WATCHING TARGET: @{WORKER_USERNAME}")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    except Exception as e:
-        print(f"❌ LOGIN FAILED: {e}")
-        return
-
+    print("🔄 Starting Userbot...")
+    await app.start()
+    me = await app.get_me()
+    print(f"✅ LOGGED IN AS: {me.first_name}")
     await idle()
     await app.stop()
 
